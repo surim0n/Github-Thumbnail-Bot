@@ -6,6 +6,71 @@ import os
 import time
 from PIL import Image
 import io
+import sqlite3
+from datetime import datetime
+
+DB_NAME = "trending_ai_repos.db"
+
+def init_db(db_name=DB_NAME):
+    """Initializes the SQLite database and creates the table if it doesn't exist."""
+    conn = sqlite3.connect(db_name)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS repositories (
+            url TEXT PRIMARY KEY,
+            name TEXT,
+            description_trending_page TEXT,
+            last_seen_trending TEXT,
+            stars INTEGER, 
+            created_at TEXT,
+            twitter_handle TEXT,
+            screenshot_path TEXT
+        )
+    ''')
+    conn.commit()
+    conn.close()
+    print(f"Database '{db_name}' initialized.")
+
+def save_repo_to_db(repo_data, db_name=DB_NAME):
+    """Saves or updates repository data in the SQLite database."""
+    conn = sqlite3.connect(db_name)
+    cursor = conn.cursor()
+    now = datetime.now().isoformat()
+    
+    # Use INSERT OR REPLACE to handle existing entries based on the PRIMARY KEY (url)
+    # Update the last_seen_trending timestamp and description whenever it's seen again
+    cursor.execute('''
+        INSERT OR REPLACE INTO repositories (
+            url, name, description_trending_page, last_seen_trending, 
+            stars, created_at, twitter_handle, screenshot_path
+        ) 
+        VALUES (?, ?, ?, ?, 
+                (SELECT stars FROM repositories WHERE url = ?), 
+                (SELECT created_at FROM repositories WHERE url = ?), 
+                (SELECT twitter_handle FROM repositories WHERE url = ?),
+                (SELECT screenshot_path FROM repositories WHERE url = ?)
+        )
+    ''', (repo_data['url'], repo_data['name'], repo_data['description'], now,
+          repo_data['url'], repo_data['url'], repo_data['url'], repo_data['url']))
+          
+    conn.commit()
+    conn.close()
+
+def update_screenshot_path(repo_url, path, db_name=DB_NAME):
+    """Updates the screenshot path for a given repository URL."""
+    if not path:
+        return
+    conn = sqlite3.connect(db_name)
+    cursor = conn.cursor()
+    cursor.execute('''
+        UPDATE repositories 
+        SET screenshot_path = ? 
+        WHERE url = ?
+    ''', (path, repo_url))
+    conn.commit()
+    conn.close()
+    print(f"  Updated screenshot path for {repo_url} to {path}")
+
 
 def get_trending_ai_repos(url="https://github.com/trending/python?since=daily&spoken_language_code=en"):
     """
@@ -15,7 +80,7 @@ def get_trending_ai_repos(url="https://github.com/trending/python?since=daily&sp
         url (str): The URL of the GitHub trending page to scrape.
 
     Returns:
-        list: A list of tuples, where each tuple contains (repo_name, repo_url).
+        list: A list of dictionaries, where each dict contains {'name': str, 'url': str, 'description': str}.
     """
     ai_keywords = ['ai', 'llm', 'artificial intelligence', 'machine learning', 'deep learning', 'neural network']
     ai_repos = []
@@ -52,10 +117,14 @@ def get_trending_ai_repos(url="https://github.com/trending/python?since=daily&sp
 
             # Check for AI keywords
             repo_name_lower = repo_name.lower()
+            # Extract description from the trending page (might be truncated)
+            trending_desc = description_element.get_text(strip=True) if description_element else ""
+
             if any(keyword in description for keyword in ai_keywords) or \
                any(keyword in repo_name_lower for keyword in ai_keywords):
                 print(f"  Found potential AI repo: {repo_name} ({repo_url})")
-                ai_repos.append((repo_name, repo_url))
+                # ai_repos.append((repo_name, repo_url))
+                ai_repos.append({"name": repo_name, "url": repo_url, "description": trending_desc})
             # else:
             #     print(f"  Skipping repo (no keywords): {repo_name}") # Optional: for debugging non-matches
 
@@ -78,9 +147,13 @@ def capture_readme_screenshot(repo_url, output_dir="screenshots"):
     Args:
         repo_url (str): The URL of the GitHub repository.
         output_dir (str): The directory to save screenshots.
+
+    Returns:
+        str or None: The path to the saved screenshot file, or None if failed.
     """
     browser = None # Initialize browser to None
     readme_element = None # Initialize readme_element
+    saved_path = None # Track saved path
     try:
         repo_parts = [part for part in repo_url.split('/') if part]
         repo_name = f"{repo_parts[-2]}_{repo_parts[-1]}" if len(repo_parts) >= 2 else re.sub(r'[^\w\-]+', '_', repo_url)
@@ -183,6 +256,7 @@ def capture_readme_screenshot(repo_url, output_dir="screenshots"):
 
                             final_img.save(screenshot_path)
                             print(f"  Screenshot saved to: {screenshot_path}")
+                            saved_path = screenshot_path # Store the path
                             final_img.close() # Close the final image object
                             bordered_img.close() # Close the intermediate bordered image
 
@@ -210,6 +284,7 @@ def capture_readme_screenshot(repo_url, output_dir="screenshots"):
             browser.close()
             browser = None # Reset browser variable after closing
             print("  Browser closed.")
+            return saved_path # Return the saved path
 
     except Exception as e:
         # Log the specific repo URL where the error occurred
@@ -223,29 +298,45 @@ def capture_readme_screenshot(repo_url, output_dir="screenshots"):
                 print(f"    Error closing browser: {close_err}")
         # Re-raise the exception if needed, or just log and continue
         # raise e # Uncomment to stop execution on first error
+        return None # Return None on error
 
 
 if __name__ == "__main__":
-    trending_repos = get_trending_ai_repos()
-    if trending_repos:
-        print("\nPotential AI Trending Repositories:")
-        for i, (name, url) in enumerate(trending_repos):
-            print(f"{i+1}. {name}: {url}") # Number the list
+    init_db() # Initialize the database
 
+    trending_repos_data = get_trending_ai_repos()
+
+    if trending_repos_data:
+        print(f"\nFound {len(trending_repos_data)} potential AI trending repositories.")
+        # Save to database
+        print("Saving found repos to database...")
+        for repo in trending_repos_data:
+            save_repo_to_db(repo)
+        print("Finished saving repos to database.")
+
+        # --- Screenshot Logic (remains largely the same, but updates DB) --- 
         print("\nCapturing README screenshots...")
         # Limit processing for testing (adjust as needed)
-        repos_to_process = trending_repos[:3]
-        # repos_to_process = trending_repos # Uncomment to process all
+        # Use the full URL from the dictionary
+        repos_to_process = trending_repos_data[:3]
+        # repos_to_process = trending_repos_data # Uncomment to process all
 
         print(f"(Processing first {len(repos_to_process)} repositories for screenshots)")
 
-        for i, (name, url) in enumerate(repos_to_process):
-            print(f"\n--- Processing repo {i+1}/{len(repos_to_process)}: {name} ---")
-            capture_readme_screenshot(url)
+        for i, repo_info in enumerate(repos_to_process):
+            name = repo_info['name']
+            url = repo_info['url']
+            print(f"\n--- Processing repo {i+1}/{len(repos_to_process)}: {name} --- ({url})")
+            screenshot_file_path = capture_readme_screenshot(url)
+            if screenshot_file_path:
+                update_screenshot_path(url, screenshot_file_path)
+            else:
+                 print(f"  Screenshot capture failed for {url}")
+
             # Add a slightly longer delay, maybe dynamic based on success/failure?
             print("  Pausing briefly before next repo...")
             time.sleep(5) # 5-second delay
 
         print("\n--- Finished capturing screenshots. ---")
     else:
-        print("No AI-related trending repositories found.")
+        print("No AI-related trending repositories found or error fetching them.")

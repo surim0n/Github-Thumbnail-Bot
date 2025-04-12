@@ -125,3 +125,13 @@ cython_debug/
 
 # Output folder for screenshots
 screenshots/
+
+# SQLite database
+*.db
+*.db-journal*
+
+# Repomix output
+repomix-output.xml
+
+# macOS
+.DS_Store
